@@ -3,8 +3,9 @@
 This worker polls Soroban contract events and normalizes them for backend use. It is isolated from the main API server and can be run as a separate process.
 
 ## How It Works
-- Polls the Soroban RPC endpoint for contract events (create, reserve, release, refund, dispute)
-- Decodes Soroban XDR topics and values, then normalizes events into backend-friendly records. For `(Bounty, Refund)`, the record includes the bounty ID, maintainer, and refunded amount from the `BountyRefunded` payload without a follow-up contract read. For `(Bounty, Dispt)`, the record includes the bounty ID, contributor, and arbiter from the `BountyDisputed` payload without a follow-up contract read.
+
+- Polls the Soroban RPC endpoint for contract events (create, reserve, submit, release, refund, dispute)
+- Decodes Soroban XDR topics and values, then normalizes events into backend-friendly records. For `(Bounty, Submit)`, the record includes the bounty ID and contributor from the `BountySubmitted` payload without a follow-up contract read. For `(Bounty, Refund)`, the record includes the bounty ID, maintainer, and refunded amount from the `BountyRefunded` payload without a follow-up contract read. For `(Bounty, Dispt)`, the record includes the bounty ID, contributor, and arbiter from the `BountyDisputed` payload without a follow-up contract read.
 - Appends new events to a local file (`indexed-events.json`) for demonstration (replace with DB logic as needed)
 - Handles errors gracefully so failures do not affect the main API server
 
@@ -34,6 +35,7 @@ node indexer.js
 - Extend the normalization logic as the contract evolves.
 
 ## Extending
+
 - Replace file storage with a database for production use.
 - Add more robust error handling and alerting as needed.
 - Integrate with backend API or event consumers if required.

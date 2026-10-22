@@ -6,12 +6,12 @@
 
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
-    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Events, MockAuth, MockAuthInvoke},
     xdr::{ScErrorCode, ScErrorType},
-    Address, Env, Error, IntoVal, String,
+    Address, Env, Error, FromVal, IntoVal, String,
 };
 use stellar_bounty_board::{
-    BountyStatus, StellarBountyBoardContract, StellarBountyBoardContractClient,
+    BountyDisputed, BountyStatus, StellarBountyBoardContract, StellarBountyBoardContractClient,
 };
 
 #[contract]
@@ -156,23 +156,31 @@ fn only_the_contributor_can_dispute_a_bounty() {
 
     f.client.dispute_bounty(&bounty_id, &f.arbiter);
 
+    // Verify BountyDisputed event was published
+    let events = f.env.events().all().filter_by_contract(&f.client.address);
+    let dispute_event = events
+        .events()
+        .last()
+        .expect("dispute event should be emitted");
+    let soroban_sdk::xdr::ContractEventBody::V0(body) = &dispute_event.body;
+    let t0 = soroban_sdk::Symbol::from_val(&f.env, &body.topics[0]);
+    let t1 = soroban_sdk::Symbol::from_val(&f.env, &body.topics[1]);
+    assert_eq!(t0, symbol_short!("Bounty"));
+    assert_eq!(t1, symbol_short!("Dispt"));
+    let event_payload = BountyDisputed::from_val(&f.env, &body.data);
+    assert_eq!(
+        event_payload,
+        BountyDisputed {
+            bounty_id,
+            contributor: f.contributor.clone(),
+            arbiter: f.arbiter.clone(),
+        }
+    );
+
     let bounty = f.client.get_bounty(&bounty_id);
     assert_eq!(bounty.status, BountyStatus::Disputed);
     assert_eq!(bounty.dispute_raised_at, f.env.ledger().timestamp());
     assert_eq!(bounty.contributor, Some(f.contributor.clone()));
-
-    // Verify BountyDisputed event was published
-    let events = f.env.events().all().filter_by_contract(&f.client.address);
-    let dispute_event = events.events().last().expect("dispute event should be emitted");
-    let topics = dispute_event.topics();
-    assert_eq!(
-        topics.get(0).unwrap(),
-        symbol_short!("Bounty").into_val(&f.env)
-    );
-    assert_eq!(
-        topics.get(1).unwrap(),
-        symbol_short!("Dispt").into_val(&f.env)
-    );
 
     // ── 2. Wrong signer cases (each incorrect role) ───────────────────────────
     // When someone else (maintainer, arbiter, admin, outsider) signs the
