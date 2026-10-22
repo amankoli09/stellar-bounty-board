@@ -1256,7 +1256,7 @@ app.post(
  */
 const openIssuesQuerySchema = z.object({}).strict();
 
-app.get('/api/open-issues', async (req: Request, res: Response) => {
+app.get('/api/open-issues', idempotencyMiddleware, async (req: Request, res: Response) => {
   // Validate query params — must be empty; any unknown key is a 400.
   const queryResult = openIssuesQuerySchema.safeParse(req.query);
   if (!queryResult.success) {
