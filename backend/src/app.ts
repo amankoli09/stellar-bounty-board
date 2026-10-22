@@ -147,7 +147,9 @@ const readLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many read requests, please slow down.' },
-  skip: () => process.env.NODE_ENV === 'test' && process.env.RATE_LIMIT_TEST_MODE !== 'true',
+  skip: (req: Request) =>
+    (process.env.NODE_ENV === 'test' && process.env.RATE_LIMIT_TEST_MODE !== 'true') ||
+    Boolean(req.path && (req.path === '/api/open-issues' || req.path.endsWith('/open-issues'))),
 });
 
 const mutationLimiter = rateLimit({
@@ -158,7 +160,12 @@ const mutationLimiter = rateLimit({
   message: { error: 'Too many mutations, please slow down.' },
   skip: (req: Request) =>
     (process.env.NODE_ENV === 'test' && process.env.RATE_LIMIT_TEST_MODE !== 'true') ||
-    Boolean(req.path && (req.path.endsWith('/release') || req.path.endsWith('/submit') || req.path.endsWith('/refund'))),
+    Boolean(
+      req.path &&
+      (req.path.endsWith('/release') ||
+        req.path.endsWith('/submit') ||
+        req.path.endsWith('/refund'))
+    ),
 });
 
 /**
@@ -263,6 +270,43 @@ export const refundLimiter = rateLimit({
     res.setHeader('Retry-After', String(retryAfter));
     res.status(429).json({
       error: 'Too many bounty refund attempts. Please try again later.',
+      retryAfter,
+      requestId: req.requestId,
+    });
+  },
+});
+
+/**
+ * Route-specific explicit rate limiter for GET /api/open-issues (#1222).
+ *
+ * Cost justification:
+ * Fetching open candidate issues is a public, unauthenticated read operation that:
+ * 1. Queries upstream third-party GitHub REST API (/repos/:owner/:repo/issues) on cache misses.
+ * 2. Consumes GitHub API rate limits (60 req/hr unauthenticated, 5,000 req/hr authenticated).
+ *    Excessive requests from unauthenticated clients could exhaust GitHub API quotas for the entire
+ *    platform, causing downstream service degradation (HTTP 502/403).
+ * 3. While responses are cached for 10 minutes (openIssuesCacheSeconds), an attacker or aggressive crawler
+ *    hitting expired entries or requesting with distinct cache headers can cause repeated upstream fetch spikes.
+ * 4. Legitimate frontend clients fetch this list during discovery or board browsing; normal users do not
+ *    need more than a few requests per minute.
+ *
+ * An explicit ceiling of 30 requests per minute (configurable via RATE_LIMIT_OPEN_ISSUES_MAX and
+ * RATE_LIMIT_OPEN_ISSUES_WINDOW_MS) protects upstream API quotas and backend memory while providing
+ * more than ample capacity for legitimate browsing.
+ *
+ * When the limit is exceeded, HTTP 429 is returned with an explicit Retry-After header.
+ */
+export const openIssuesLimiter = rateLimit({
+  windowMs: appConfig.rateLimitOpenIssuesWindowMs,
+  max: appConfig.rateLimitOpenIssuesMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => process.env.NODE_ENV === 'test' && process.env.RATE_LIMIT_TEST_MODE !== 'true',
+  handler: (req: Request, res: Response) => {
+    const retryAfter = Math.ceil(appConfig.rateLimitOpenIssuesWindowMs / 1000);
+    res.setHeader('Retry-After', String(retryAfter));
+    res.status(429).json({
+      error: 'Too many requests for open issues. Please try again later.',
       retryAfter,
       requestId: req.requestId,
     });
@@ -1365,28 +1409,38 @@ app.post(
  */
 const openIssuesQuerySchema = z.object({}).strict();
 
-app.get('/api/open-issues', idempotencyMiddleware, async (req: Request, res: Response) => {
-  // Validate query params — must be empty; any unknown key is a 400.
-  const queryResult = openIssuesQuerySchema.safeParse(req.query);
-  if (!queryResult.success) {
-    jsonError(res, req, 400, `INVALID_QUERY: ${zodErrorMessage(queryResult.error)}`);
-    return;
-  }
+app.get(
+  '/api/open-issues',
+  openIssuesLimiter,
+  idempotencyMiddleware,
+  async (req: Request, res: Response) => {
+    // Validate query params — must be empty; any unknown key is a 400.
+    const queryResult = openIssuesQuerySchema.safeParse(req.query);
+    if (!queryResult.success) {
+      jsonError(res, req, 400, `INVALID_QUERY: ${zodErrorMessage(queryResult.error)}`);
+      return;
+    }
 
-  // Reject any accidental request body.
-  if (req.body && Object.keys(req.body).length > 0) {
-    jsonError(res, req, 400, 'INVALID_BODY: GET /api/open-issues does not accept a request body.');
-    return;
-  }
+    // Reject any accidental request body.
+    if (req.body && Object.keys(req.body).length > 0) {
+      jsonError(
+        res,
+        req,
+        400,
+        'INVALID_BODY: GET /api/open-issues does not accept a request body.'
+      );
+      return;
+    }
 
-  try {
-    const data = await listOpenIssues();
-    res.set('Cache-Control', `max-age=${appConfig.openIssuesCacheSeconds}`);
-    res.json({ data });
-  } catch (error) {
-    sendError(res, req, error, 502);
+    try {
+      const data = await listOpenIssues();
+      res.set('Cache-Control', `max-age=${appConfig.openIssuesCacheSeconds}`);
+      res.json({ data });
+    } catch (error) {
+      sendError(res, req, error, 502);
+    }
   }
-});
+);
 
 app.get('/api/bounties/:id/events', (req: Request, res: Response) => {
   try {
